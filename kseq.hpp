@@ -109,6 +109,7 @@ public:
                 return -1;
             seq.last_char = c;
         }
+        seq.name.clear();
         seq.comment.clear();
         seq.seq.clear();
         seq.qual.clear();
@@ -135,13 +136,12 @@ public:
 
         if (c == -1)
             return -2;
-        while ((c = this->getc()) != -1 && seq.qual.length() < seq.seq.length()) {
-            if (c >= 33 && c <= 127)
-                seq.qual += (char)c;
+        this->getQuality(seq.qual, 0);
+        if (seq.qual.length() != seq.seq.length()) {
+            std::cerr << "FATAL ERROR: >" << seq.name << " is invalid, the sequence length differs from the quality length" << std::endl;
+            exit(-2);
         }
         seq.last_char = 0;
-        if (seq.seq.length() != seq.qual.length())
-            return -2;
         return (int)seq.seq.length();
     }
 
@@ -213,6 +213,51 @@ private:
                 }
             }
             else i = 0;
+
+            str.append(this->buf + this->begin, static_cast<unsigned long>(i - this->begin));
+            this->begin = i + 1;
+            if (i < this->end)
+            {
+                if (dret)
+                    *dret = this->buf[i];
+                break;
+            }
+        }
+        return (int)str.length();
+    }
+
+    int getQuality(std::string &str, int *dret)
+    {
+        if (dret)
+            *dret = 0;
+        if (!str.empty()) {
+            str.clear();
+        }
+
+        if (this->begin >= this->end && this->is_eof)
+            return -1;
+        for (;;)
+        {
+            int i;
+            if (this->begin >= this->end)
+            {
+                if (!this->is_eof)
+                {
+                    this->begin = 0;
+                    this->end = this->readfunc(this->f, this->buf, bufferSize);
+                    if (this->end < bufferSize)
+                        this->is_eof = 1;
+                    if (this->end == 0)
+                        break;
+                }
+                else
+                    break;
+            }
+            for (i = this->begin; i < this->end; ++i)
+            {
+                if (this->buf[i] == '\n')
+                    break;
+            }
 
             str.append(this->buf + this->begin, static_cast<unsigned long>(i - this->begin));
             this->begin = i + 1;
