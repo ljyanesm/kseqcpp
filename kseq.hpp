@@ -76,13 +76,12 @@ public:
 class kseq
 {
 public:
-    kseq() : last_char(0) {};
-    ~kseq() = default;;
+    ~kseq() = default;
     std::string name;
     std::string comment;
     std::string seq;
     std::string qual;
-    int last_char;
+    int last_char = 0;
 };
 
 
@@ -90,8 +89,10 @@ template<class ret_t, class ReadFunction>
 class kstream
 {
 public:
+    enum Delimiter {SPACE=1, EOL=0};
     kstream(ret_t f, ReadFunction rf) : bufferSize(4096), f(f), is_eof(0), begin(0), end(0), readfunc(rf) {
         buf = (char*) malloc(bufferSize);
+        c = getHeader();
     }
 
     ~kstream()
@@ -99,25 +100,120 @@ public:
         free(buf);
     }
 
-    int read(kseq& seq)
-    {
-        int c;
-        if (seq.last_char == 0)
-        {
-            while ((c = this->getc()) != -1 && c != '>' && c != '@');
-            if (c == -1)
-                return -1;
-            seq.last_char = c;
-        }
-        seq.name.clear();
+    int readFastq(kseq& seq) {
         seq.comment.clear();
         seq.seq.clear();
         seq.qual.clear();
 
-        if (this->getuntil(0, seq.name, &c) < 0)
+        if (c != '\n') {
+            std::cerr << "ERROR: Unexpected record start, last valid record: " << seq.name << std::endl;
+            return -3;
+        }
+
+        if (getName(seq) == -1) {
+            if (is_eof != 1) {
+                std::cerr << "ERROR: Unexpected ID after " << seq.name << std::endl;
+                return -3;
+            } else {
+                return -2;
+            }
+        }
+
+        bool good(false);
+        switch(c){
+            case 10:    // new line character
+                good = true;
+                break;
+        }
+        if (!good) {
+            std::cerr << "ERROR: There must have been a problem reading the ID of " << seq.name << std::endl;
+            return -3;
+        }
+
+        getSeq(seq);
+        if (c != '+')
+            return (int)seq.seq.length();
+        while ((c = this->getc()) != -1 && c != '\n');  // Ignore whatever comes after '+'
+
+        if (c == -1) {
+            std::cerr << "ERROR: File ended unexpectedly on ID " << seq.name << std::endl;
+            return -3; // File ended unexpectedly
+        }
+
+        getQual(seq);
+        if (c != '\n') {
+            std::cerr << "ERROR: The quality string appears to be longer for ID " << seq.name << std::endl;
+            return -3;
+        }
+        if (seq.seq.length() != seq.qual.length()) {
+            std::cerr << "ERROR: The length of the sequence doesn't match the quality for ID " << seq.name << std::endl;
+            return -3;
+        }
+        return (int)seq.seq.length();
+    }
+
+    int readFasta(kseq& seq) {
+        seq.comment.clear();
+        seq.seq.clear();
+        seq.qual.clear();
+
+        if (c != '\n') {
+            std::cerr << "ERROR: Unexpected record start, last valid record: " << seq.name << std::endl;
+            return -3;
+        }
+
+        if (getName(seq) == -1) {
+            if (is_eof != 1) {
+                std::cerr << "ERROR: Unexpected ID after " << seq.name << std::endl;
+                return -3;
+            } else {
+                return -2;
+            }
+        }
+
+        bool good(false);
+        switch (c) {
+            case 10:    // new line character
+                good = true;
+                break;
+        }
+        if (!good) {
+            std::cerr << "ERROR: There must have been a problem reading the ID of " << seq.name << std::endl;
+            return -3;
+        }
+
+        getSeq(seq);
+        if (c == '\n') {
+            return (int) seq.seq.length();
+        } else if (is_eof != 1) {
+            std::cerr << "ERROR: There was an error reading the sequence of the record: " << seq.name << std::endl;
+            return -3;
+        }
+    }
+
+private:
+    int getHeader() {
+        int c;
+        while ((c = this->getc()) != -1 && c != '>' && c != '@');
+        if (c == -1) {
+            std::cerr << "ERROR: The file appears to be empty" << std::endl;
+            return -1;
+        }
+        if (c == int('>') || c == int('@')){
+            begin--;
+            c = int('\n');
+        }
+        return c;
+    }
+
+    int getName(kseq& seq) {
+        if (this->getuntil(SPACE, seq.name, &c) < 0)
             return -1;
         if (c != '\n')
-            this->getuntil( '\n', seq.comment, 0);
+            return this->getuntil( EOL, seq.comment, &c);
+    }
+
+    int getSeq(kseq& seq){
         while ((c = this->getc()) != -1 && c != '>' && c != '+' && c != '@')
         {
             if (isgraph(c))
@@ -125,27 +221,15 @@ public:
                 seq.seq += (char)c;
             }
         }
-        if (c == '>' || c == '@')
-            seq.last_char = c;
-
-        if (c != '+')
-            return (int)seq.seq.length();
-
-
-        while ((c = this->getc()) != -1 && c != '\n');
-
-        if (c == -1)
-            return -2;
-        this->getQuality(seq.qual, 0);
-        if (seq.qual.length() != seq.seq.length()) {
-            std::cerr << "FATAL ERROR: >" << seq.name << " is invalid, the sequence length differs from the quality length" << std::endl;
-            exit(-2);
-        }
-        seq.last_char = 0;
-        return (int)seq.seq.length();
     }
 
-private:
+    void getQual(kseq& seq){
+        while ((c = this->getc()) != -1 && seq.qual.length() < seq.seq.length()) {
+            if (c >= 33 && c <= 127)
+                seq.qual += (char)c;
+        }
+    }
+
     int getc()
     {
         if (this->is_eof && this->begin >= this->end)
@@ -162,7 +246,7 @@ private:
         return (int)this->buf[this->begin++];
     }
 
-    int getuntil(int delimiter, std::string &str, int *dret)
+    int getuntil(Delimiter delimiter, std::string &str, int *dret)
     {
         if (dret)
             *dret = 0;
@@ -189,26 +273,19 @@ private:
                 else
                     break;
             }
-            if (delimiter > 1)
+            if (delimiter == EOL)
             {
                 for (i = this->begin; i < this->end; ++i)
                 {
-                    if (this->buf[i] == delimiter)
+                    if (this->buf[i] == '\n')
                         break;
                 }
             }
-            else if (delimiter == 0)
+            else if (delimiter == SPACE)
             {
                 for (i = this->begin; i < this->end; ++i)
                 {
                     if (isspace(this->buf[i]))
-                        break;
-                }
-            }
-            else if (delimiter == 1)
-            {
-                for (i = this->begin; i < this->end; ++i){
-                    if (isspace(this->buf[i]) && this->buf[i] != ' ')
                         break;
                 }
             }
@@ -226,51 +303,7 @@ private:
         return (int)str.length();
     }
 
-    int getQuality(std::string &str, int *dret)
-    {
-        if (dret)
-            *dret = 0;
-        if (!str.empty()) {
-            str.clear();
-        }
-
-        if (this->begin >= this->end && this->is_eof)
-            return -1;
-        for (;;)
-        {
-            int i;
-            if (this->begin >= this->end)
-            {
-                if (!this->is_eof)
-                {
-                    this->begin = 0;
-                    this->end = this->readfunc(this->f, this->buf, bufferSize);
-                    if (this->end < bufferSize)
-                        this->is_eof = 1;
-                    if (this->end == 0)
-                        break;
-                }
-                else
-                    break;
-            }
-            for (i = this->begin; i < this->end; ++i)
-            {
-                if (this->buf[i] == '\n')
-                    break;
-            }
-
-            str.append(this->buf + this->begin, static_cast<unsigned long>(i - this->begin));
-            this->begin = i + 1;
-            if (i < this->end)
-            {
-                if (dret)
-                    *dret = this->buf[i];
-                break;
-            }
-        }
-        return (int)str.length();
-    }
-
+    int c;
     char *buf;
     int begin;
     int end;
